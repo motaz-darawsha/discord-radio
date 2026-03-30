@@ -1,0 +1,328 @@
+# discord-radio
+
+A minimal, flexible audio stream player for Discord voice channels. Built with TypeScript, uses **FFmpeg** (`spawn`) for robust audio processing, and supports **ESM**, **CommonJS**, and **TypeScript** out of the box.
+
+## Features
+
+- Play any audio stream URL in Discord voice channels
+- Playback controls: **play**, **stop**, **pause**, **resume**
+- Volume control (0–100) via FFmpeg audio filter
+- Auto-leave voice channel when playback stops
+- Full TypeScript support with strict types
+- Dual **ESM** / **CJS** build — works everywhere
+- Event-driven architecture for full control
+- Custom FFmpeg arguments for advanced use cases
+- Minimal dependencies
+
+## Requirements
+
+- **Node.js** >= 18.0.0
+- **discord.js** >= 14.0.0
+- **FFmpeg** installed on the system (or use [`ffmpeg-static`](https://www.npmjs.com/package/ffmpeg-static))
+- An Opus library — one of:
+  - [`@discordjs/opus`](https://www.npmjs.com/package/@discordjs/opus) (recommended)
+  - [`opusscript`](https://www.npmjs.com/package/opusscript)
+
+## Installation
+
+```bash
+npm install discord-radio @discordjs/opus
+```
+
+```bash
+yarn add discord-radio @discordjs/opus
+```
+
+```bash
+pnpm add discord-radio @discordjs/opus
+```
+
+> Make sure FFmpeg is installed on your system. On Ubuntu: `sudo apt install ffmpeg`
+
+## Quick Start
+
+### TypeScript
+
+```typescript
+import { Client, GatewayIntentBits } from "discord.js";
+import { RadioPlayer } from "discord-radio";
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+const player = new RadioPlayer({
+  volume: 80,
+  autoLeave: true,
+});
+
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  if (message.content === "!play") {
+    const channel = message.member?.voice.channel;
+    if (!channel) {
+      await message.reply("You need to be in a voice channel!");
+      return;
+    }
+
+    await player.play(channel, "https://example.com/stream.mp3");
+    await message.reply("Now playing!");
+  }
+
+  if (message.content === "!stop") {
+    player.stop();
+    await message.reply("Stopped!");
+  }
+
+  if (message.content === "!pause") {
+    player.pause();
+    await message.reply("Paused!");
+  }
+
+  if (message.content === "!resume") {
+    player.resume();
+    await message.reply("Resumed!");
+  }
+
+  if (message.content.startsWith("!volume")) {
+    const vol = parseInt(message.content.split(" ")[1] ?? "");
+    if (isNaN(vol)) {
+      await message.reply("Usage: !volume <0-100>");
+      return;
+    }
+    player.setVolume(vol);
+    await message.reply(`Volume set to ${vol}%`);
+  }
+});
+
+client.login("YOUR_BOT_TOKEN");
+```
+
+### CommonJS
+
+```javascript
+const { Client, GatewayIntentBits } = require("discord.js");
+const { RadioPlayer } = require("discord-radio");
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
+
+const player = new RadioPlayer({ volume: 80 });
+
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  const channel = message.member?.voice.channel;
+
+  if (message.content === "!play" && channel) {
+    await player.play(channel, "https://example.com/stream.mp3");
+  }
+
+  if (message.content === "!stop") player.stop();
+  if (message.content === "!pause") player.pause();
+  if (message.content === "!resume") player.resume();
+});
+
+client.login("YOUR_BOT_TOKEN");
+```
+
+### ESM (JavaScript)
+
+```javascript
+import { Client, GatewayIntentBits } from "discord.js";
+import { RadioPlayer } from "discord-radio";
+
+const player = new RadioPlayer({ volume: 80 });
+
+// Same usage as TypeScript example above
+```
+
+## API Reference
+
+### `new RadioPlayer(options?)`
+
+Creates a new player instance.
+
+| Option              | Type       | Default                                                                          | Description                                        |
+| ------------------- | ---------- | -------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `autoLeave`         | `boolean`  | `true`                                                                           | Auto-leave voice channel when playback stops       |
+| `volume`            | `number`   | `100`                                                                            | Initial volume level (0–100)                       |
+| `connectionTimeout` | `number`   | `30000`                                                                          | Max time (ms) to wait for voice connection         |
+| `ffmpegPath`        | `string`   | `"ffmpeg"`                                                                       | Path or command name of FFmpeg binary              |
+| `ffmpegInputArgs`   | `string[]` | `["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]`   | Extra FFmpeg input arguments                       |
+| `ffmpegOutputArgs`  | `string[]` | `[]`                                                                             | Extra FFmpeg output arguments                      |
+
+### Methods
+
+#### `player.play(channel, url, options?)`
+
+Plays an audio stream URL in the given voice channel using FFmpeg.
+
+- `channel` — `VoiceBasedChannel` — The Discord voice channel to join.
+- `url` — `string` — The audio stream URL to play.
+- `options.volume` — `number` (optional) — Override volume for this playback.
+- `options.inputType` — `StreamType` (optional) — Hint for the stream type.
+- `options.ffmpegInputArgs` — `string[]` (optional) — Override FFmpeg input args.
+- `options.ffmpegOutputArgs` — `string[]` (optional) — Override FFmpeg output args.
+
+Returns: `Promise<void>`
+
+#### `player.stop()`
+
+Stops playback and kills the FFmpeg process. If `autoLeave` is enabled, the bot leaves the voice channel.
+
+#### `player.pause()`
+
+Pauses playback. Returns `true` if successfully paused.
+
+#### `player.resume()`
+
+Resumes playback. Returns `true` if successfully resumed.
+
+#### `player.setVolume(level)`
+
+Sets the volume level (0–100). Restarts FFmpeg with the new volume filter applied.
+
+#### `player.disconnect()`
+
+Disconnects from the voice channel without destroying the player.
+
+#### `player.destroy()`
+
+Destroys the player instance and releases all resources. The instance cannot be reused.
+
+### Properties
+
+| Property     | Type                       | Description                        |
+| ------------ | -------------------------- | ---------------------------------- |
+| `status`     | `PlayerStatus`             | Current player status              |
+| `volume`     | `number`                   | Current volume level (0–100)       |
+| `currentUrl` | `string \| null`           | Currently playing URL              |
+| `channel`    | `VoiceBasedChannel \| null`| Connected voice channel            |
+| `isPlaying`  | `boolean`                  | Whether audio is currently playing |
+| `isPaused`   | `boolean`                  | Whether playback is paused         |
+| `isConnected`| `boolean`                  | Whether connected to a channel     |
+
+### Events
+
+| Event          | Payload                                    | Description                     |
+| -------------- | ------------------------------------------ | ------------------------------- |
+| `play`         | `(url: string)`                            | Playback started                |
+| `stop`         | `()`                                       | Playback stopped                |
+| `pause`        | `()`                                       | Playback paused                 |
+| `resume`       | `()`                                       | Playback resumed                |
+| `volumeChange` | `(volume: number)`                         | Volume level changed            |
+| `error`        | `(error: RadioPlayerError)`                | An error occurred               |
+| `statusChange` | `(old: PlayerStatus, new: PlayerStatus)`   | Player status changed           |
+| `connect`      | `(channel: VoiceBasedChannel)`             | Connected to a voice channel    |
+| `disconnect`   | `()`                                       | Disconnected from voice channel |
+| `destroy`      | `()`                                       | Player instance destroyed       |
+
+### `PlayerStatus`
+
+```typescript
+enum PlayerStatus {
+  Idle = "idle",
+  Connecting = "connecting",
+  Playing = "playing",
+  Paused = "paused",
+  Destroyed = "destroyed",
+}
+```
+
+### Error Classes
+
+All errors extend `RadioPlayerError`:
+
+| Class              | Code               | Description                         |
+| ------------------ | ------------------ | ----------------------------------- |
+| `RadioPlayerError` | varies             | Base error class                    |
+| `InvalidStateError`| `INVALID_STATE`    | Operation not allowed in this state |
+| `ConnectionError`  | `CONNECTION_ERROR` | Voice connection failed             |
+| `ValidationError`  | `VALIDATION_ERROR` | Invalid argument provided           |
+| `PlaybackError`    | `PLAYBACK_ERROR`   | Audio playback failed               |
+| `FFmpegError`      | `FFMPEG_ERROR`     | FFmpeg process failed               |
+
+## Advanced Usage
+
+### Event Handling
+
+```typescript
+import { RadioPlayer, PlayerStatus } from "discord-radio";
+
+const player = new RadioPlayer();
+
+player.on("statusChange", (oldStatus, newStatus) => {
+  console.log(`Status: ${oldStatus} → ${newStatus}`);
+});
+
+player.on("error", (error) => {
+  console.error(`[${error.code}] ${error.message}`);
+});
+
+player.on("play", (url) => {
+  console.log(`Now playing: ${url}`);
+});
+```
+
+### Custom FFmpeg Path
+
+```typescript
+import { RadioPlayer } from "discord-radio";
+
+// Use ffmpeg-static
+import ffmpegPath from "ffmpeg-static";
+
+const player = new RadioPlayer({
+  ffmpegPath: ffmpegPath ?? "ffmpeg",
+  volume: 80,
+});
+```
+
+### Custom FFmpeg Arguments
+
+```typescript
+import { RadioPlayer } from "discord-radio";
+
+const player = new RadioPlayer({
+  ffmpegInputArgs: [
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "10",
+    "-headers", "User-Agent: MyBot/1.0",
+  ],
+});
+```
+
+### Multiple Players (Per Guild)
+
+```typescript
+import { RadioPlayer } from "discord-radio";
+
+const players = new Map<string, RadioPlayer>();
+
+function getPlayer(guildId: string): RadioPlayer {
+  let player = players.get(guildId);
+  if (!player) {
+    player = new RadioPlayer({ volume: 80 });
+    players.set(guildId, player);
+  }
+  return player;
+}
+```
+
+## License
+
+[MIT](./LICENSE)
