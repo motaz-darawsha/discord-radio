@@ -27,6 +27,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
     "clean": "rm -rf dist"
   },
   "keywords": [
