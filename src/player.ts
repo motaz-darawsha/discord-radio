@@ -618,9 +618,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
 
     // Stop the audio player
     if (this.state.player) {
-      this.state.player.stop(true);
-      this.state.player.removeAllListeners();
+      const player = this.state.player;
       this.state.player = null;
+      player.stop(true);
+      player.removeAllListeners();
     }
 
     // Clean up the resource
@@ -664,9 +665,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     this.killFFmpeg();
 
     if (this.state.player) {
-      this.state.player.stop(true);
-      this.state.player.removeAllListeners();
+      const player = this.state.player;
       this.state.player = null;
+      player.stop(true);
+      player.removeAllListeners();
     }
 
     this.state.resource = null;
