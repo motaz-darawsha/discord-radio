@@ -11,6 +11,7 @@ export { RadioPlayer } from "./player.js";
 
 export {
   PlayerStatus,
+  type FFmpegOptions,
   type RadioPlayerOptions,
   type PlayOptions,
   type PlayerState,

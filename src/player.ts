@@ -24,6 +24,7 @@ import {
   type PlayOptions,
   type PlayerState,
   type RadioPlayerEvents,
+  type ResolvedOptions,
   type InternalPlayerState,
 } from "./types.js";
 import {
@@ -45,15 +46,19 @@ const DEFAULT_FFMPEG_INPUT_ARGS: readonly string[] = [
 ];
 
 /**
- * Default options for the RadioPlayer.
+ * Default resolved options for the RadioPlayer.
  */
-const DEFAULT_OPTIONS: Required<RadioPlayerOptions> = {
+const DEFAULT_OPTIONS: ResolvedOptions = {
+  defaultVolume: 100,
   autoLeave: true,
-  volume: 100,
+  selfDeaf: true,
+  loop: false,
   connectionTimeout: 30_000,
-  ffmpegPath: "ffmpeg",
-  ffmpegInputArgs: [...DEFAULT_FFMPEG_INPUT_ARGS],
-  ffmpegOutputArgs: [],
+  ffmpeg: {
+    path: "ffmpeg",
+    inputArgs: [...DEFAULT_FFMPEG_INPUT_ARGS],
+    outputArgs: [],
+  },
 };
 
 /**
@@ -71,6 +76,24 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 /**
+ * Resolves user-provided options into a fully populated options object.
+ */
+function resolveOptions(options?: RadioPlayerOptions): ResolvedOptions {
+  return {
+    defaultVolume: options?.defaultVolume ?? DEFAULT_OPTIONS.defaultVolume,
+    autoLeave: options?.autoLeave ?? DEFAULT_OPTIONS.autoLeave,
+    selfDeaf: options?.selfDeaf ?? DEFAULT_OPTIONS.selfDeaf,
+    loop: options?.loop ?? DEFAULT_OPTIONS.loop,
+    connectionTimeout: options?.connectionTimeout ?? DEFAULT_OPTIONS.connectionTimeout,
+    ffmpeg: {
+      path: options?.ffmpeg?.path ?? DEFAULT_OPTIONS.ffmpeg.path,
+      inputArgs: options?.ffmpeg?.inputArgs ?? [...DEFAULT_OPTIONS.ffmpeg.inputArgs],
+      outputArgs: options?.ffmpeg?.outputArgs ?? [...DEFAULT_OPTIONS.ffmpeg.outputArgs],
+    },
+  };
+}
+
+/**
  * A flexible, minimal audio stream player for Discord voice channels.
  * Uses FFmpeg (spawn) for audio processing, supporting any stream URL.
  *
@@ -78,7 +101,11 @@ function isFiniteNumber(value: unknown): value is number {
  * ```typescript
  * import { RadioPlayer } from "discord-radio";
  *
- * const player = new RadioPlayer({ volume: 80 });
+ * const player = new RadioPlayer({
+ *   defaultVolume: 80,
+ *   loop: true,
+ *   ffmpeg: { path: "ffmpeg" },
+ * });
  *
  * // Play a stream URL
  * await player.play(voiceChannel, "https://example.com/stream.mp3");
@@ -87,41 +114,49 @@ function isFiniteNumber(value: unknown): value is number {
  * player.pause();
  * player.resume();
  * player.setVolume(50);
+ * player.setLoop(false);
  * player.stop(); // auto-leaves channel
  * ```
  */
 export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
-  private readonly options: Required<RadioPlayerOptions>;
+  private readonly options: ResolvedOptions;
   private state: InternalPlayerState;
 
   constructor(options?: RadioPlayerOptions) {
     super();
 
-    this.options = { ...DEFAULT_OPTIONS, ...options };
+    this.options = resolveOptions(options);
 
-    if (!isFiniteNumber(this.options.volume) || this.options.volume < 0 || this.options.volume > 100) {
-      throw new ValidationError("Volume must be a number between 0 and 100.");
+    if (!isFiniteNumber(this.options.defaultVolume) || this.options.defaultVolume < 0 || this.options.defaultVolume > 100) {
+      throw new ValidationError("Default volume must be a number between 0 and 100.");
     }
 
     if (!isFiniteNumber(this.options.connectionTimeout) || this.options.connectionTimeout < 0) {
       throw new ValidationError("Connection timeout must be a non-negative number.");
     }
 
-    if (typeof this.options.ffmpegPath !== "string" || this.options.ffmpegPath.trim().length === 0) {
+    if (typeof this.options.ffmpeg.path !== "string" || this.options.ffmpeg.path.trim().length === 0) {
       throw new ValidationError("FFmpeg path must be a non-empty string.");
     }
 
     this.state = {
       status: PlayerStatus.Idle,
-      volume: this.options.volume,
+      volume: this.options.defaultVolume,
+      loop: this.options.loop,
+      loopCount: 0,
       connection: null,
       player: null,
       resource: null,
       channel: null,
       currentUrl: null,
       ffmpegProcess: null,
+      playbackStartedAt: null,
+      pausedAt: null,
+      totalPausedDuration: 0,
     };
   }
+
+  // ─── Public Getters ─────────────────────────────────────────────────
 
   /**
    * Returns a snapshot of the player's current state.
@@ -132,6 +167,9 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       volume: this.state.volume,
       channel: this.state.channel,
       connected: this.state.connection !== null,
+      currentUrl: this.state.currentUrl,
+      loop: this.state.loop,
+      playbackDuration: this.playbackDuration,
     };
   }
 
@@ -185,6 +223,31 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
   }
 
   /**
+   * Returns whether loop mode is enabled.
+   */
+  public get loop(): boolean {
+    return this.state.loop;
+  }
+
+  /**
+   * Returns how long the current stream has been playing in milliseconds.
+   * Accounts for time spent paused. Returns `0` if not playing.
+   */
+  public get playbackDuration(): number {
+    if (this.state.playbackStartedAt === null) {
+      return 0;
+    }
+
+    const now = Date.now();
+    const elapsed = now - this.state.playbackStartedAt;
+    const currentPause = this.state.pausedAt !== null ? now - this.state.pausedAt : 0;
+
+    return Math.max(0, elapsed - this.state.totalPausedDuration - currentPause);
+  }
+
+  // ─── Public Methods ─────────────────────────────────────────────────
+
+  /**
    * Plays an audio stream URL in the specified voice channel.
    * Spawns an FFmpeg process to decode the audio stream and pipes it
    * to the Discord voice connection.
@@ -221,9 +284,9 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       throw new ValidationError("Volume must be a number between 0 and 100.");
     }
 
-    // Stop current playback if any
+    // Stop current playback if any (manual stop, no finish event)
     if (this.state.status === PlayerStatus.Playing || this.state.status === PlayerStatus.Paused) {
-      this.stopInternal(false);
+      this.stopInternal(false, false);
     }
 
     const oldStatus = this.state.status;
@@ -241,8 +304,8 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       connection.subscribe(player);
 
       // Spawn FFmpeg and create audio resource
-      const inputArgs = options?.ffmpegInputArgs ?? this.options.ffmpegInputArgs;
-      const outputArgs = options?.ffmpegOutputArgs ?? this.options.ffmpegOutputArgs;
+      const inputArgs = options?.ffmpeg?.inputArgs ?? this.options.ffmpeg.inputArgs;
+      const outputArgs = options?.ffmpeg?.outputArgs ?? this.options.ffmpeg.outputArgs;
       const { process: ffmpegProcess, resource } = this.spawnFFmpeg(url, playVolume, inputArgs, outputArgs);
 
       player.play(resource);
@@ -256,6 +319,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       this.state.currentUrl = url;
       this.state.ffmpegProcess = ffmpegProcess;
       this.state.status = PlayerStatus.Playing;
+      this.state.loopCount = 0;
+      this.state.playbackStartedAt = Date.now();
+      this.state.pausedAt = null;
+      this.state.totalPausedDuration = 0;
 
       this.emitStatusChange(PlayerStatus.Connecting, PlayerStatus.Playing);
       this.emit("play", url);
@@ -282,7 +349,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
    */
   public stop(): void {
     this.assertNotDestroyed();
-    this.stopInternal(this.options.autoLeave);
+    this.stopInternal(this.options.autoLeave, false);
   }
 
   /**
@@ -301,6 +368,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     const paused = this.state.player.pause(true);
 
     if (paused) {
+      this.state.pausedAt = Date.now();
       this.state.status = PlayerStatus.Paused;
       this.emitStatusChange(PlayerStatus.Playing, PlayerStatus.Paused);
       this.emit("pause");
@@ -325,6 +393,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     const resumed = this.state.player.unpause();
 
     if (resumed) {
+      if (this.state.pausedAt !== null) {
+        this.state.totalPausedDuration += Date.now() - this.state.pausedAt;
+        this.state.pausedAt = null;
+      }
       this.state.status = PlayerStatus.Playing;
       this.emitStatusChange(PlayerStatus.Paused, PlayerStatus.Playing);
       this.emit("resume");
@@ -336,8 +408,8 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
   /**
    * Sets the volume level (0-100).
    *
-   * When changing volume, the current FFmpeg process is respawned with
-   * the new volume applied via the FFmpeg audio filter.
+   * Volume is adjusted in real-time via the inline volume transformer
+   * without restarting the FFmpeg process or interrupting playback.
    *
    * @param level - The volume level (0-100).
    * @throws {ValidationError} If the volume is not a valid number.
@@ -354,7 +426,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     const previousVolume = this.state.volume;
     this.state.volume = clamped;
 
-    // If currently playing, adjust inline volume without restarting FFmpeg
+    // Adjust inline volume without restarting FFmpeg
     if (
       (this.state.status === PlayerStatus.Playing || this.state.status === PlayerStatus.Paused) &&
       this.state.resource?.volume &&
@@ -364,6 +436,18 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     }
 
     this.emit("volumeChange", clamped);
+  }
+
+  /**
+   * Enables or disables loop mode.
+   * When enabled, the current stream will automatically restart when it finishes.
+   *
+   * @param enabled - Whether to enable loop mode.
+   * @throws {InvalidStateError} If the player has been destroyed.
+   */
+  public setLoop(enabled: boolean): void {
+    this.assertNotDestroyed();
+    this.state.loop = enabled;
   }
 
   /**
@@ -377,7 +461,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       return;
     }
 
-    this.stopInternal(true);
+    this.stopInternal(true, false);
 
     const oldStatus = this.state.status;
     this.state.status = PlayerStatus.Destroyed;
@@ -405,8 +489,8 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
   private spawnFFmpeg(
     url: string,
     volume: number,
-    inputArgs: string[],
-    outputArgs: string[],
+    inputArgs: readonly string[],
+    outputArgs: readonly string[],
   ): { process: ChildProcess; resource: AudioResource } {
     const args: string[] = [
       ...inputArgs,
@@ -420,7 +504,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       "pipe:1",
     ];
 
-    const ffmpegProcess = spawn(this.options.ffmpegPath, args, {
+    const ffmpegProcess = spawn(this.options.ffmpeg.path, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -433,7 +517,6 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     let stderrData = "";
     ffmpegProcess.stderr?.on("data", (chunk: Buffer) => {
       stderrData += chunk.toString();
-      // Limit collected stderr to prevent memory issues
       if (stderrData.length > 4096) {
         stderrData = stderrData.slice(-2048);
       }
@@ -470,17 +553,19 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
    */
   private killFFmpeg(): void {
     if (this.state.ffmpegProcess) {
-      try {
-        this.state.ffmpegProcess.removeAllListeners();
-        this.state.ffmpegProcess.stderr?.removeAllListeners();
+      const proc = this.state.ffmpegProcess;
+      this.state.ffmpegProcess = null;
 
-        if (!this.state.ffmpegProcess.killed) {
-          this.state.ffmpegProcess.kill("SIGKILL");
+      try {
+        proc.removeAllListeners();
+        proc.stderr?.removeAllListeners();
+
+        if (!proc.killed) {
+          proc.kill("SIGKILL");
         }
       } catch {
         // Process may already be dead
       }
-      this.state.ffmpegProcess = null;
     }
   }
 
@@ -497,9 +582,9 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
 
     const connection = joinVoiceChannel({
       channelId: channel.id,
-      guildId: guildId,
+      guildId,
       adapterCreator: channel.guild.voiceAdapterCreator,
-      selfDeaf: true,
+      selfDeaf: this.options.selfDeaf,
     });
 
     this.setupConnectionListeners(connection);
@@ -555,8 +640,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
   private createPlayer(): AudioPlayer {
     // Stop and clean up old player if it exists
     if (this.state.player) {
-      this.state.player.stop(true);
-      this.state.player.removeAllListeners();
+      const oldPlayer = this.state.player;
+      this.state.player = null;
+      oldPlayer.stop(true);
+      oldPlayer.removeAllListeners();
     }
 
     const player = createAudioPlayer({
@@ -570,7 +657,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
         `Audio player error: ${error.message}`,
       );
       this.emit("error", wrappedError);
-      this.stopInternal(this.options.autoLeave);
+      this.stopInternal(this.options.autoLeave, false);
     });
 
     player.on(AudioPlayerStatus.Idle, () => {
@@ -579,7 +666,7 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
         this.state.status === PlayerStatus.Playing ||
         this.state.status === PlayerStatus.Paused
       ) {
-        this.stopInternal(this.options.autoLeave);
+        this.handlePlaybackFinished();
       }
     });
 
@@ -587,9 +674,60 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
   }
 
   /**
-   * Internal stop implementation.
+   * Handles natural playback completion — emits `finish`, and either
+   * loops the stream or stops playback.
    */
-  private stopInternal(shouldLeave: boolean): void {
+  private handlePlaybackFinished(): void {
+    const finishedUrl = this.state.currentUrl;
+
+    // Emit finish event for natural end
+    if (finishedUrl !== null) {
+      this.emit("finish", finishedUrl);
+    }
+
+    // If loop is enabled and we have the necessary state, restart playback
+    if (this.state.loop && finishedUrl !== null && this.state.player && this.state.connection) {
+      this.state.loopCount++;
+      this.emit("loop", finishedUrl, this.state.loopCount);
+
+      // Kill old FFmpeg and spawn a new one
+      this.killFFmpeg();
+
+      try {
+        const { process: ffmpegProcess, resource } = this.spawnFFmpeg(
+          finishedUrl,
+          this.state.volume,
+          this.options.ffmpeg.inputArgs,
+          this.options.ffmpeg.outputArgs,
+        );
+
+        this.state.ffmpegProcess = ffmpegProcess;
+        this.state.resource = resource;
+        this.state.playbackStartedAt = Date.now();
+        this.state.pausedAt = null;
+        this.state.totalPausedDuration = 0;
+        this.state.player.play(resource);
+      } catch (error) {
+        const wrappedError = new PlaybackError(
+          `Failed to restart looped playback: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        this.emit("error", wrappedError);
+        this.stopInternal(this.options.autoLeave, false);
+      }
+      return;
+    }
+
+    // No loop — stop normally (isNaturalEnd=true but finish already emitted above)
+    this.stopInternal(this.options.autoLeave, false);
+  }
+
+  /**
+   * Internal stop implementation.
+   *
+   * @param shouldLeave - Whether to disconnect from the voice channel.
+   * @param isNaturalEnd - Whether the stop was triggered by natural playback end.
+   */
+  private stopInternal(shouldLeave: boolean, _isNaturalEnd: boolean): void {
     const wasPlayingOrPaused =
       this.state.status === PlayerStatus.Playing ||
       this.state.status === PlayerStatus.Paused;
@@ -605,9 +743,13 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       player.removeAllListeners();
     }
 
-    // Clean up the resource
+    // Clean up the resource and playback tracking
     this.state.resource = null;
     this.state.currentUrl = null;
+    this.state.playbackStartedAt = null;
+    this.state.pausedAt = null;
+    this.state.totalPausedDuration = 0;
+    this.state.loopCount = 0;
 
     // Disconnect if needed
     if (shouldLeave) {
@@ -656,6 +798,10 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     this.state.connection = null;
     this.state.channel = null;
     this.state.currentUrl = null;
+    this.state.playbackStartedAt = null;
+    this.state.pausedAt = null;
+    this.state.totalPausedDuration = 0;
+    this.state.loopCount = 0;
 
     if (
       this.state.status !== PlayerStatus.Idle &&

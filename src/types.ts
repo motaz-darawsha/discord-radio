@@ -20,9 +20,39 @@ export enum PlayerStatus {
 }
 
 /**
+ * FFmpeg-related configuration options.
+ */
+export interface FFmpegOptions {
+  /**
+   * The path or command name of the FFmpeg binary.
+   * @default "ffmpeg"
+   */
+  path?: string;
+
+  /**
+   * Additional FFmpeg input arguments prepended before the input URL.
+   * Useful for headers, timeouts, reconnect options, etc.
+   * @default ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+   */
+  inputArgs?: string[];
+
+  /**
+   * Additional FFmpeg output arguments appended after the output format flags.
+   * @default []
+   */
+  outputArgs?: string[];
+}
+
+/**
  * Options for creating a new RadioPlayer instance.
  */
 export interface RadioPlayerOptions {
+  /**
+   * The initial volume level (0-100).
+   * @default 100
+   */
+  defaultVolume?: number;
+
   /**
    * Whether to automatically leave the voice channel when playback stops.
    * @default true
@@ -30,10 +60,16 @@ export interface RadioPlayerOptions {
   autoLeave?: boolean;
 
   /**
-   * The initial volume level (0-100).
-   * @default 100
+   * Whether the bot should join the voice channel deafened.
+   * @default true
    */
-  volume?: number;
+  selfDeaf?: boolean;
+
+  /**
+   * Whether to loop the current stream when it finishes.
+   * @default false
+   */
+  loop?: boolean;
 
   /**
    * Maximum time in milliseconds to wait for a voice connection to become ready.
@@ -42,23 +78,9 @@ export interface RadioPlayerOptions {
   connectionTimeout?: number;
 
   /**
-   * The path or command name of the FFmpeg binary.
-   * @default "ffmpeg"
+   * FFmpeg configuration options.
    */
-  ffmpegPath?: string;
-
-  /**
-   * Additional FFmpeg input arguments prepended before the input URL.
-   * Useful for headers, timeouts, reconnect options, etc.
-   * @default ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
-   */
-  ffmpegInputArgs?: string[];
-
-  /**
-   * Additional FFmpeg output arguments appended after the output format flags.
-   * @default []
-   */
-  ffmpegOutputArgs?: string[];
+  ffmpeg?: FFmpegOptions;
 }
 
 /**
@@ -78,16 +100,9 @@ export interface PlayOptions {
   inputType?: StreamType;
 
   /**
-   * Additional FFmpeg input arguments for this specific playback.
-   * These are merged with (and override) the instance-level ffmpegInputArgs.
+   * FFmpeg argument overrides for this specific playback.
    */
-  ffmpegInputArgs?: string[];
-
-  /**
-   * Additional FFmpeg output arguments for this specific playback.
-   * These are merged with (and override) the instance-level ffmpegOutputArgs.
-   */
-  ffmpegOutputArgs?: string[];
+  ffmpeg?: Pick<FFmpegOptions, "inputArgs" | "outputArgs">;
 }
 
 /**
@@ -102,6 +117,12 @@ export interface PlayerState {
   channel: VoiceBasedChannel | null;
   /** Whether the player has an active voice connection. */
   connected: boolean;
+  /** The URL currently being played, or `null` if idle. */
+  currentUrl: string | null;
+  /** Whether loop mode is enabled. */
+  loop: boolean;
+  /** How long the current stream has been playing in milliseconds. */
+  playbackDuration: number;
 }
 
 /**
@@ -110,8 +131,12 @@ export interface PlayerState {
 export interface RadioPlayerEvents {
   /** Emitted when playback starts. */
   play: [url: string];
-  /** Emitted when playback stops. */
+  /** Emitted when playback stops (both manual and natural). */
   stop: [];
+  /** Emitted when playback finishes naturally (stream ended, not user-stopped). */
+  finish: [url: string];
+  /** Emitted when a looped stream restarts. */
+  loop: [url: string, count: number];
   /** Emitted when playback is paused. */
   pause: [];
   /** Emitted when playback is resumed. */
@@ -132,15 +157,33 @@ export interface RadioPlayerEvents {
 
 /**
  * @internal
+ * Resolved (required) version of RadioPlayerOptions used internally.
+ */
+export interface ResolvedOptions {
+  readonly defaultVolume: number;
+  readonly autoLeave: boolean;
+  readonly selfDeaf: boolean;
+  readonly loop: boolean;
+  readonly connectionTimeout: number;
+  readonly ffmpeg: Readonly<Required<FFmpegOptions>>;
+}
+
+/**
+ * @internal
  * Internal state tracked by the player.
  */
 export interface InternalPlayerState {
   status: PlayerStatus;
   volume: number;
+  loop: boolean;
+  loopCount: number;
   connection: VoiceConnection | null;
   player: AudioPlayer | null;
   resource: AudioResource | null;
   channel: VoiceBasedChannel | null;
   currentUrl: string | null;
   ffmpegProcess: ChildProcess | null;
+  playbackStartedAt: number | null;
+  pausedAt: number | null;
+  totalPausedDuration: number;
 }
