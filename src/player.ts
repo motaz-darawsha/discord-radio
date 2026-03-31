@@ -71,14 +71,6 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 /**
- * Converts a volume level (0-100) to a FFmpeg volume filter value.
- * FFmpeg volume filter uses a float where 1.0 = 100%.
- */
-function volumeToFFmpeg(volume: number): string {
-  return (volume / 100).toFixed(2);
-}
-
-/**
  * A flexible, minimal audio stream player for Discord voice channels.
  * Uses FFmpeg (spawn) for audio processing, supporting any stream URL.
  *
@@ -362,26 +354,13 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
     const previousVolume = this.state.volume;
     this.state.volume = clamped;
 
-    // If currently playing, restart FFmpeg with the new volume
+    // If currently playing, adjust inline volume without restarting FFmpeg
     if (
       (this.state.status === PlayerStatus.Playing || this.state.status === PlayerStatus.Paused) &&
-      this.state.currentUrl &&
-      this.state.player &&
-      this.state.connection &&
+      this.state.resource?.volume &&
       previousVolume !== clamped
     ) {
-      this.killFFmpeg();
-
-      const { process: ffmpegProcess, resource } = this.spawnFFmpeg(
-        this.state.currentUrl,
-        clamped,
-        this.options.ffmpegInputArgs,
-        this.options.ffmpegOutputArgs,
-      );
-
-      this.state.ffmpegProcess = ffmpegProcess;
-      this.state.resource = resource;
-      this.state.player.play(resource);
+      this.state.resource.volume.setVolume(clamped / 100);
     }
 
     this.emit("volumeChange", clamped);
@@ -434,7 +413,6 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
       "-i", url,
       "-analyzeduration", "0",
       "-loglevel", "error",
-      "-af", `volume=${volumeToFFmpeg(volume)}`,
       "-f", "s16le",
       "-ar", "48000",
       "-ac", "2",
@@ -478,8 +456,11 @@ export class RadioPlayer extends EventEmitter<RadioPlayerEvents> {
 
     const resource = createAudioResource(ffmpegProcess.stdout, {
       inputType: StreamType.Raw,
-      inlineVolume: false,
+      inlineVolume: true,
     });
+
+    // Set the initial volume via inline volume transformer
+    resource.volume?.setVolume(volume / 100);
 
     return { process: ffmpegProcess, resource };
   }
