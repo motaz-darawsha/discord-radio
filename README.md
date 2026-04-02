@@ -30,15 +30,15 @@ A minimal, flexible audio stream player for Discord voice channels. Built with T
 ## Installation
 
 ```bash
-npm install discord-radio @discordjs/opus
+npm install github:motazdarawsha/discord-radio @discordjs/opus
 ```
 
 ```bash
-yarn add discord-radio @discordjs/opus
+yarn add github:motazdarawsha/discord-radio @discordjs/opus
 ```
 
 ```bash
-pnpm add discord-radio @discordjs/opus
+pnpm add github:motazdarawsha/discord-radio @discordjs/opus
 ```
 
 > Make sure FFmpeg is installed on your system. On Ubuntu: `sudo apt install ffmpeg`
